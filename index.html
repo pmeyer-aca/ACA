@@ -79,15 +79,15 @@
     color:#B9C3BC;
     font-family:'Inter',sans-serif;
   }
-  .tabs-wrap{display:flex;align-items:center;gap:10px;}
+  .tabs-wrap{display:flex;align-items:center;gap:10px;background:rgba(255,255,255,0.04);padding:6px 10px;border:1px solid #3A423E;border-radius:6px;}
   .tabs-label{font-size:11px;color:#9BA39D;text-transform:uppercase;letter-spacing:0.08em;font-family:'Inter',sans-serif;}
   .tabs{display:flex;gap:4px;background:rgba(255,255,255,0.06);padding:4px;border-radius:5px;}
   .tab-btn{
     background:transparent;
     border:1px solid transparent;
     color:#B9C3BC;
-    padding:9px 20px;
-    font-size:13.5px;
+    padding:10px 22px;
+    font-size:14px;
     text-transform:uppercase;
     letter-spacing:0.06em;
     cursor:pointer;
@@ -316,10 +316,10 @@
       </div>
     </div>
     <div class="tabs-wrap">
-      <span class="tabs-label">2 vues :</span>
+      <span class="tabs-label">2 onglets :</span>
       <div class="tabs">
-        <button class="tab-btn" data-view="equipe">Équipe</button>
-        <button class="tab-btn active" data-view="joueurs">Joueurs</button>
+        <button class="tab-btn active" data-view="joueurs">👥 Joueurs</button>
+        <button class="tab-btn" data-view="equipe">⚽ Équipe</button>
       </div>
     </div>
   </div>
@@ -331,6 +331,7 @@
 
 <footer id="footer" style="display:none;">
   Données lues depuis <code>data.xlsx</code>. Pour mettre à jour ces chiffres, remplacez ce fichier par votre classeur Excel exporté (même nom).
+  <br>Conception P. Meyer
 </footer>
 
 <script>
@@ -353,6 +354,7 @@ const state = {
 };
 
 let topScorersChart = null;
+let topAssistsChart = null;
 
 // ---------------------------------------------------------------
 // Chargement et lecture du classeur
@@ -559,8 +561,12 @@ function renderEquipe() {
     <h2 class="section-title">Matchs</h2>
     <div class="table-wrap"><table id="match-table"></table></div>
 
-    <h2 class="section-title">Gardiens</h2>
-    <div class="table-wrap"><table id="gardien-table"></table></div>
+    <h2 class="section-title">Performance des compositions</h2>
+    <p style="font-size:13px;color:var(--ink-soft);margin:-6px 0 14px;">
+      Buts marqués/encaissés selon les joueurs présents sur le terrain au moment du but.
+      Les compositions avec peu de minutes jouées sont peu significatives statistiquement.
+    </p>
+    <div class="table-wrap"><table id="composition-table"></table></div>
 
     <h2 class="section-title">Détail par match</h2>
     <div class="match-picker">
@@ -575,7 +581,7 @@ function renderEquipe() {
 
   renderScoreboard(filteredMatches());
   renderMatchTable(filteredMatches());
-  renderGardienTable(filteredMatches());
+  renderCompositionTable();
   renderMatchPicker();
 }
 
@@ -652,32 +658,82 @@ function renderMatchTable(matches) {
   });
 }
 
-function renderGardienTable(matches) {
-  const table = document.getElementById('gardien-table');
-  const numerosVisibles = new Set(matches.map(m => m.numero));
-  const matchByNum = {};
-  state.matches.forEach(m => matchByNum[m.numero] = m);
-  const rows = state.gardien
-    .filter(g => numerosVisibles.has(g.numero))
-    .slice()
-    .sort((a, b) => b.numero - a.numero);
+function computeCompositionStats() {
+  const stats = new Map();
 
+  function keyFor(set) { return Array.from(set).sort().join(' | '); }
+  function ensure(key, players) {
+    if (!stats.has(key)) stats.set(key, { players, minutes: 0, butsPour: 0, butsContre: 0, matches: new Set() });
+    return stats.get(key);
+  }
+
+  state.matches.forEach(match => {
+    const numero = match.numero;
+    const conv = state.convocations.filter(c => c.numero === numero && c.convoque === 'Oui');
+    if (conv.length === 0) return;
+    const onField = new Set(conv.filter(c => c.titulaire === 'Oui').map(c => c.joueur));
+    const duree = match.duree || 90;
+
+    const timeline = [];
+    state.changements.filter(c => c.numero === numero).forEach(c => timeline.push({ minute: c.minute || 0, kind: 'sub', sort: c.sort, entre: c.entre }));
+    state.buts.filter(b => b.numero === numero).forEach(b => timeline.push({ minute: b.minute || 0, kind: 'goal', camp: b.camp }));
+    timeline.sort((a, b) => a.minute - b.minute);
+
+    let segmentStart = 0;
+    let curKey = keyFor(onField);
+    let curPlayers = Array.from(onField).sort();
+
+    timeline.forEach(ev => {
+      if (ev.kind === 'goal') {
+        const entry = ensure(curKey, curPlayers);
+        if (ev.camp === 'Nous') entry.butsPour++; else entry.butsContre++;
+        entry.matches.add(numero);
+      } else {
+        const segMinutes = Math.max(0, ev.minute - segmentStart);
+        if (segMinutes > 0) { const e = ensure(curKey, curPlayers); e.minutes += segMinutes; e.matches.add(numero); }
+        if (ev.sort) onField.delete(ev.sort);
+        if (ev.entre) onField.add(ev.entre);
+        segmentStart = ev.minute;
+        curKey = keyFor(onField);
+        curPlayers = Array.from(onField).sort();
+      }
+    });
+    const segMinutes = Math.max(0, duree - segmentStart);
+    if (segMinutes > 0) { const e = ensure(curKey, curPlayers); e.minutes += segMinutes; e.matches.add(numero); }
+  });
+
+  return Array.from(stats.values())
+    .filter(s => s.minutes > 0)
+    .map(s => ({
+      players: s.players,
+      minutes: s.minutes,
+      butsPour: s.butsPour,
+      butsContre: s.butsContre,
+      diff: s.butsPour - s.butsContre,
+      matches: s.matches.size,
+      diffPer90: (s.butsPour - s.butsContre) * 90 / s.minutes,
+    }))
+    .sort((a, b) => b.diffPer90 - a.diffPer90 || b.minutes - a.minutes);
+}
+
+function renderCompositionTable() {
+  const table = document.getElementById('composition-table');
+  const rows = computeCompositionStats();
   table.innerHTML = `
     <thead><tr>
-      <th>Date</th><th>Adversaire</th><th>Gardien</th>
-      <th class="num">Buts encaissés</th><th>Clean sheet</th>
+      <th>Composition sur le terrain</th><th class="num">Min. jouées</th>
+      <th class="num">Buts marqués</th><th class="num">Buts encaissés</th>
+      <th class="num">Diff.</th><th class="num">Diff. / 90 min</th>
     </tr></thead>
     <tbody>
-      ${rows.length ? rows.map(g => {
-        const m = matchByNum[g.numero];
-        return `<tr>
-          <td>${m ? fmtDate(m.date) : '—'}</td>
-          <td>${m ? escapeHtml(m.adversaire || '—') : '—'}</td>
-          <td>${escapeHtml(g.gardien || '—')}</td>
-          <td class="num">${g.butsEncaisses != null ? g.butsEncaisses : '—'}</td>
-          <td>${g.cleanSheet != null && g.cleanSheet !== '' ? escapeHtml(String(g.cleanSheet)) : '—'}</td>
-        </tr>`;
-      }).join('') : '<tr><td colspan="5" class="empty">Aucune donnée gardien pour l\'instant.</td></tr>'}
+      ${rows.length ? rows.map(r => `<tr>
+        <td>${r.players.map(escapeHtml).join(', ')}</td>
+        <td class="num">${r.minutes}</td>
+        <td class="num">${r.butsPour}</td>
+        <td class="num">${r.butsContre}</td>
+        <td class="num">${r.diff > 0 ? '+' : ''}${r.diff}</td>
+        <td class="num">${r.diffPer90 > 0 ? '+' : ''}${r.diffPer90.toFixed(2)}</td>
+      </tr>`).join('') : '<tr><td colspan="6" class="empty">Pas assez de données pour calculer les compositions.</td></tr>'}
     </tbody>`;
 }
 
@@ -711,6 +767,7 @@ function renderMatchDetail() {
   const titulaires = conv.filter(c => c.convoque === 'Oui' && c.titulaire === 'Oui');
   const remplacants = conv.filter(c => c.convoque === 'Oui' && c.titulaire !== 'Oui');
   const absents = conv.filter(c => c.convoque !== 'Oui');
+  const gardiensMatch = state.gardien.filter(g => g.numero === numero).map(g => g.gardien);
 
   const changementsM = state.changements.filter(c => c.numero === numero);
   const butsM = state.buts.filter(b => b.numero === numero);
@@ -746,11 +803,11 @@ function renderMatchDetail() {
     <div class="lineup-grid">
       <div class="lineup-col">
         <h4>Onze de départ</h4>
-        ${titulaires.length ? titulaires.map(p => lineupPlayerHtml(numero, p)).join('') : '<div class="lineup-empty">Non renseigné</div>'}
+        ${titulaires.length ? titulaires.map(p => lineupPlayerHtml(numero, p, gardiensMatch.includes(p.joueur))).join('') : '<div class="lineup-empty">Non renseigné</div>'}
       </div>
       <div class="lineup-col bench">
         <h4>Remplaçants</h4>
-        ${remplacants.length ? remplacants.map(p => lineupPlayerHtml(numero, p)).join('') : '<div class="lineup-empty">Aucun</div>'}
+        ${remplacants.length ? remplacants.map(p => lineupPlayerHtml(numero, p, gardiensMatch.includes(p.joueur))).join('') : '<div class="lineup-empty">Aucun</div>'}
       </div>
     </div>
     ${absents.length ? `<div class="absents">Non convoqués : ${absents.map(a => escapeHtml(a.joueur) + (a.motif ? ` (${escapeHtml(a.motif)})` : '')).join(', ')}</div>` : ''}
@@ -802,14 +859,15 @@ function renderMatchDetail() {
   `;
 }
 
-function lineupPlayerHtml(numero, p) {
+function lineupPlayerHtml(numero, p, isGardien) {
   const s = statsJoueurMatch(numero, p.joueur);
-  let tag = '';
-  if (p.titulaire !== 'Oui' && p.minEntree != null) tag = `entré (${p.minEntree}e)`;
-  else if (p.titulaire !== 'Oui' && p.minEntree == null) tag = 'non entré';
+  const tags = [];
+  if (isGardien) tags.push('🧤 Gardien');
+  if (p.titulaire !== 'Oui' && p.minEntree != null) tags.push(`entré (${p.minEntree}e)`);
+  else if (p.titulaire !== 'Oui' && p.minEntree == null) tags.push('non entré');
   return `<div class="lineup-player">
     <span class="name">${escapeHtml(p.joueur)}<span class="badges">${badgesHtml(s)}</span></span>
-    <span class="tags">${tag}</span>
+    <span class="tags">${tags.join(' · ')}</span>
   </div>`;
 }
 
@@ -879,8 +937,12 @@ function renderJoueurs() {
     </div>
     <h2 class="section-title">Utilisation joueurs</h2>
     <div class="table-wrap"><table id="player-table"></table></div>
+    <h2 class="section-title">Gardiens</h2>
+    <div class="table-wrap"><table id="gardien-table"></table></div>
     <h2 class="section-title">Top buteurs</h2>
     <div class="chart-box"><canvas id="scorers-chart"></canvas></div>
+    <h2 class="section-title">Top passeurs</h2>
+    <div class="chart-box"><canvas id="assists-chart"></canvas></div>
     <h2 class="section-title">Fiche joueur</h2>
     <div class="player-picker">
       <select id="player-select"></select>
@@ -897,7 +959,9 @@ function renderJoueurs() {
   });
 
   renderPlayerTable();
+  renderGardienTable();
   renderScorersChart();
+  renderAssistsChart();
   renderPlayerPicker();
 }
 
@@ -953,6 +1017,31 @@ function renderPlayerTable() {
   });
 }
 
+function renderGardienTable() {
+  const table = document.getElementById('gardien-table');
+  const matchByNum = {};
+  state.matches.forEach(m => matchByNum[m.numero] = m);
+  const rows = state.gardien.slice().sort((a, b) => b.numero - a.numero);
+
+  table.innerHTML = `
+    <thead><tr>
+      <th>Date</th><th>Adversaire</th><th>Gardien</th>
+      <th class="num">Buts encaissés</th><th>Clean sheet</th>
+    </tr></thead>
+    <tbody>
+      ${rows.length ? rows.map(g => {
+        const m = matchByNum[g.numero];
+        return `<tr>
+          <td>${m ? fmtDate(m.date) : '—'}</td>
+          <td>${m ? escapeHtml(m.adversaire || '—') : '—'}</td>
+          <td>${escapeHtml(g.gardien || '—')}</td>
+          <td class="num">${g.butsEncaisses != null ? g.butsEncaisses : '—'}</td>
+          <td>${g.cleanSheet != null && g.cleanSheet !== '' ? escapeHtml(String(g.cleanSheet)) : '—'}</td>
+        </tr>`;
+      }).join('') : '<tr><td colspan="5" class="empty">Aucune donnée gardien pour l\'instant.</td></tr>'}
+    </tbody>`;
+}
+
 function renderScorersChart() {
   const top = state.players.filter(p => p.buts > 0).sort((a, b) => b.buts - a.buts).slice(0, 10);
   const ctx = document.getElementById('scorers-chart');
@@ -966,6 +1055,32 @@ function renderScorersChart() {
     data: {
       labels: top.map(p => p.nom),
       datasets: [{ label: 'Buts', data: top.map(p => p.buts), backgroundColor: '#1E5631' }],
+    },
+    options: {
+      indexAxis: 'y',
+      responsive: true,
+      plugins: { legend: { display: false } },
+      scales: {
+        x: { beginAtZero: true, ticks: { precision: 0, font: { family: 'Inter' } } },
+        y: { ticks: { font: { family: 'Inter', size: 12 } } },
+      },
+    },
+  });
+}
+
+function renderAssistsChart() {
+  const top = state.players.filter(p => p.passes > 0).sort((a, b) => b.passes - a.passes).slice(0, 10);
+  const ctx = document.getElementById('assists-chart');
+  if (topAssistsChart) topAssistsChart.destroy();
+  if (top.length === 0) {
+    ctx.parentElement.innerHTML = '<div class="empty">Aucune passe décisive pour l\'instant.</div>';
+    return;
+  }
+  topAssistsChart = new Chart(ctx, {
+    type: 'bar',
+    data: {
+      labels: top.map(p => p.nom),
+      datasets: [{ label: 'Passes décisives', data: top.map(p => p.passes), backgroundColor: '#A93F2B' }],
     },
     options: {
       indexAxis: 'y',
